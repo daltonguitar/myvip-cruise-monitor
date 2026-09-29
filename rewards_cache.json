@@ -1,1 +1,37 @@
-{}
+{
+  "cruise_West Coast": {
+    "title": "West Coast",
+    "partner": "CRUISE",
+    "available": true,
+    "summary": "West Coast | Cruise Pacific Coast Highway",
+    "link": "https://myvip.co/rewardstore"
+  },
+  "cruise_Cruise Pacific Coast Highway": {
+    "title": "Cruise Pacific Coast Highway",
+    "partner": "CRUISE",
+    "available": true,
+    "summary": "Cruise Pacific Coast Highway",
+    "link": "https://myvip.co/rewardstore"
+  },
+  "cruise_Cruise": {
+    "title": "Cruise",
+    "partner": "CRUISE",
+    "available": true,
+    "summary": "Cruise | Bon Voyage!",
+    "link": "https://myvip.co/rewardstore"
+  },
+  "norwegian_Norwegian": {
+    "title": "Norwegian",
+    "partner": "NORWEGIAN",
+    "available": true,
+    "summary": "Norwegian | Various Ports, Worldwide",
+    "link": "https://myvip.co/rewardstore"
+  },
+  "royal caribbean_Royal Caribbean": {
+    "title": "Royal Caribbean",
+    "partner": "ROYAL CARIBBEAN",
+    "available": true,
+    "summary": "Royal Caribbean | Various Ports, Worldwide",
+    "link": "https://myvip.co/rewardstore"
+  }
+}
