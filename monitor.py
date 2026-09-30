@@ -28,7 +28,7 @@ def send_alert(title: str, partner: str, status: str, link: str, points: str = "
     print(f"\n[ALERT] {partner} | {title} | {status}\n")
 
     if DISCORD_WEBHOOK_URL:
-        embed_color = 5763719 if "AVAILABLE" in status else 15548997 # Green vs Red
+        embed_color = 5763719 if "AVAILABLE" in status else 15548997  # Green vs Red
         embed = {
             "title": f"🚢 {title}",
             "url": link,
@@ -103,7 +103,6 @@ def check_rewards(page) -> dict:
     # Extract all distinct cards with their full text breakdown
     cards_data = page.evaluate("""() => {
         const results = [];
-        // Catch cards or clickable items
         const cards = document.querySelectorAll('div[class*="Card"], div[class*="card"], a[href*="/reward/"], div[role="button"]');
         
         cards.forEach(card => {
@@ -144,8 +143,7 @@ def check_rewards(page) -> dict:
         if any(ign in text_lower for ign in GENERIC_IGNORE) and len(item["lines"]) <= 2:
             continue
 
-        # Isolate the specific reward title:
-        # Prefer the line mentioning "Cruise", "Night", "Two", or the ship name
+        # Isolate specific reward title
         specific_title = ""
         for line in item["lines"]:
             l_lower = line.lower()
@@ -156,7 +154,7 @@ def check_rewards(page) -> dict:
         if not specific_title:
             specific_title = item["lines"][0]
 
-        # Extract loyalty point cost if displayed (e.g. "1,500,000" or "LP")
+        # Extract loyalty point cost if displayed
         points = ""
         for line in item["lines"]:
             if any(char.isdigit() for char in line) and any(kw in line.lower() for kw in ["pts", "points", "lp", ","]):
@@ -206,24 +204,37 @@ def main():
 
     alerts_sent = 0
     for r_id, info in current.items():
-        # New reward discovered
+        # Case 1: Brand-new reward discovered in the store
         if r_id not in cached:
             status = "✅ AVAILABLE" if info["available"] else "❌ SOLD OUT"
             send_alert(
                 title=info["title"],
                 partner=info["partner"],
-                status=status,
+                status=f"✨ NEW DROP ({status})",
                 link=info["link"],
                 points=info["points"],
                 details=info["details"]
             )
             alerts_sent += 1
-        # Restock detected
+
+        # Case 2: Restock detected (previously sold out -> now available)
         elif not cached[r_id]["available"] and info["available"]:
             send_alert(
                 title=info["title"],
                 partner=info["partner"],
-                status="🚨 RESTOCKED & AVAILABLE!",
+                status="🚨 RESTOCKED & AVAILABLE NOW!",
+                link=info["link"],
+                points=info["points"],
+                details=info["details"]
+            )
+            alerts_sent += 1
+
+        # Case 3: Reward sold out (previously available -> now sold out)
+        elif cached[r_id]["available"] and not info["available"]:
+            send_alert(
+                title=info["title"],
+                partner=info["partner"],
+                status="⚠️ RECENTLY SOLD OUT",
                 link=info["link"],
                 points=info["points"],
                 details=info["details"]
