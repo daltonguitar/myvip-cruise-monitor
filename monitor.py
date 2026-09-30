@@ -11,17 +11,17 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 CACHE_FILE = "rewards_cache.json"
 
-# Targets: Brand names, ship identifiers, or cruise lines
-TARGET_CRUISE_KEYWORDS = [
-    "norwegian", "royal caribbean", "virgin voyages", 
-    "spectrum of the seas", "anthem of the seas", "voyager of the seas",
-    "ovation of the seas", "ncl", "virgin", "scarlet lady", "valiant lady", "resilient lady"
-]
-
-# Words that indicate a generic brand header tile or category button rather than an actual redeemable reward
-GENERIC_IGNORE = [
-    "explore all", "view all", "terms & conditions", "how it works",
-    "filter", "rewards store", "category", "pacific coast highway"
+# Direct partner catalog URLs
+PARTNER_TARGETS = [
+    {
+        "name": "Norwegian Cruise Line",
+        "url": "https://myvip.co/rewardstore/partner/66"
+    },
+    {
+        "name": "Royal Caribbean",
+        "url": "https://myvip.co/rewardstore/partner/29"
+    },
+    # If Virgin Voyages has a partner ID (e.g., check its URL in your browser), add it here
 ]
 
 def send_alert(title: str, partner: str, status: str, link: str, points: str = "", details: str = ""):
@@ -34,7 +34,7 @@ def send_alert(title: str, partner: str, status: str, link: str, points: str = "
             "url": link,
             "color": embed_color,
             "fields": [
-                {"name": "Cruise Line / Partner", "value": partner, "inline": True},
+                {"name": "Partner", "value": partner, "inline": True},
                 {"name": "Status", "value": status, "inline": True},
             ]
         }
@@ -44,7 +44,7 @@ def send_alert(title: str, partner: str, status: str, link: str, points: str = "
             embed["fields"].append({"name": "Details", "value": details[:300], "inline": False})
 
         payload = {
-            "content": f"🚨 **Cruise Alert:** {title}",
+            "content": f"🚨 **Cruise Reward Update:** {title}",
             "embeds": [embed]
         }
         try:
@@ -81,41 +81,32 @@ def save_cache(cache: dict):
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(cache, f, indent=2)
 
-def check_rewards(page) -> dict:
-    print("Navigating to https://myvip.co/rewardstore ...")
-    page.goto("https://myvip.co/rewardstore", wait_until="networkidle", timeout=60000)
-    time.sleep(5)
+def scrape_partner_page(page, partner_info: dict) -> dict:
+    url = partner_info["url"]
+    partner_name = partner_info["name"]
+    print(f"\nScanning {partner_name} at {url} ...")
 
-    # Attempt to click Travel / Cruises filter category if visible to filter noise
-    try:
-        cruise_tab = page.locator("text=/Travel|Cruise/i").first
-        if cruise_tab.is_visible():
-            cruise_tab.click()
-            time.sleep(3)
-    except Exception:
-        pass
+    page.goto(url, wait_until="networkidle", timeout=60000)
+    time.sleep(4)
 
-    # Scroll down multiple times to trigger lazy-loaded catalog tiles
-    for scroll in [1000, 2000, 3000, 0]:
+    # Scroll down to ensure all cards load
+    for scroll in [1000, 2000, 0]:
         page.evaluate(f"window.scrollTo(0, {scroll});")
-        time.sleep(1.5)
+        time.sleep(1)
 
-    # Extract all distinct cards with their full text breakdown
     cards_data = page.evaluate("""() => {
         const results = [];
         const cards = document.querySelectorAll('div[class*="Card"], div[class*="card"], a[href*="/reward/"], div[role="button"]');
-        
+
         cards.forEach(card => {
             const rawText = card.innerText || "";
             const lines = rawText.split('\\n').map(l => l.trim()).filter(l => l.length > 0);
             
-            // Skip elements that are just containers of other cards or too short
-            if (lines.length < 2 || rawText.length > 600) return;
+            // Skip elements that are too small or container parents
+            if (lines.length < 2 || rawText.length > 500) return;
 
             const linkEl = card.tagName === 'A' ? card : card.querySelector('a');
             const href = linkEl ? linkEl.getAttribute('href') : '';
-
-            // Check stock status
             const soldOut = /sold out|out of stock|unavailable|0 remaining/i.test(rawText);
 
             results.push({
@@ -128,66 +119,41 @@ def check_rewards(page) -> dict:
         return results;
     }""")
 
-    print(f"Scanned {len(cards_data)} potential cards on the page.")
-
-    matched = {}
+    partner_rewards = {}
     for item in cards_data:
-        text_lower = item["rawText"].lower()
-
-        # Must mention a cruise line or ship
-        matched_partner = next((p for p in TARGET_CRUISE_KEYWORDS if p in text_lower), None)
-        if not matched_partner:
+        lines = item["lines"]
+        # Skip generic headers / back buttons
+        if any(h in lines[0].lower() for h in ["all partners", "terms", "back", "reward store"]):
             continue
 
-        # Skip generic navigation elements
-        if any(ign in text_lower for ign in GENERIC_IGNORE) and len(item["lines"]) <= 2:
-            continue
+        title = lines[0]
+        # If line 0 is a brand name, use line 1 as the actual sailing title
+        if title.lower() in ["norwegian", "royal caribbean", "virgin voyages"] and len(lines) > 1:
+            title = lines[1]
 
-        # Isolate specific reward title
-        specific_title = ""
-        for line in item["lines"]:
-            l_lower = line.lower()
-            if any(k in l_lower for k in ["cruise for two", "night", "spectrum", "anthem", "voyager", "caribbean", "norwegian", "virgin"]):
-                specific_title = line
-                break
-        
-        if not specific_title:
-            specific_title = item["lines"][0]
-
-        # Extract loyalty point cost if displayed
         points = ""
-        for line in item["lines"]:
+        for line in lines:
             if any(char.isdigit() for char in line) and any(kw in line.lower() for kw in ["pts", "points", "lp", ","]):
                 points = line
                 break
 
-        # Associate partner name
-        if "royal caribbean" in text_lower or "spectrum" in text_lower or "anthem" in text_lower:
-            partner_name = "Royal Caribbean"
-        elif "norwegian" in text_lower or "ncl" in text_lower:
-            partner_name = "Norwegian Cruise Line"
-        elif "virgin" in text_lower or "lady" in text_lower:
-            partner_name = "Virgin Voyages"
-        else:
-            partner_name = matched_partner.title()
+        reward_id = item["href"] if item["href"] else f"{partner_name}_{title}"
+        link = f"https://myvip.co{item['href']}" if item["href"].startswith("/") else (item["href"] or url)
 
-        # Build unique stable identifier
-        reward_id = item["href"] if item["href"] else f"{partner_name}_{specific_title}"
-        link = f"https://myvip.co{item['href']}" if item["href"].startswith("/") else (item["href"] or "https://myvip.co/rewardstore")
-
-        matched[reward_id] = {
-            "title": specific_title,
+        partner_rewards[reward_id] = {
+            "title": title,
             "partner": partner_name,
             "available": item["is_available"],
             "points": points,
-            "details": " • ".join(item["lines"][:4]),
+            "details": " • ".join(lines[:4]),
             "link": link
         }
 
-    return matched
+    return partner_rewards
 
 def main():
     cached = load_cache()
+    current_all = {}
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -196,17 +162,24 @@ def main():
             viewport={"width": 1440, "height": 900}
         )
         page = context.new_page()
-        current = check_rewards(page)
 
-    print(f"\nFiltered down to {len(current)} specific cruise rewards:")
-    for cid, data in current.items():
-        print(f" -> [{data['partner']}] {data['title']} | Points: {data['points']} | Avail: {data['available']}")
+        for partner in PARTNER_TARGETS:
+            try:
+                rewards = scrape_partner_page(page, partner)
+                current_all.update(rewards)
+                print(f"Found {len(rewards)} rewards for {partner['name']}.")
+            except Exception as e:
+                print(f"Error scanning {partner['name']}: {e}")
+
+    print(f"\nTotal rewards tracked: {len(current_all)}")
+    for cid, data in current_all.items():
+        print(f" -> [{data['partner']}] {data['title']} | Available: {data['available']}")
 
     alerts_sent = 0
-    for r_id, info in current.items():
-        # Case 1: Brand-new reward discovered in the store
+    for r_id, info in current_all.items():
+        # Case 1: Brand new drop
         if r_id not in cached:
-            status = "✅ AVAILABLE" if info["available"] else "❌ SOLD OUT"
+            status = "✅ AVAILABLE" if info["available"] else "❌ CURRENTLY SOLD OUT"
             send_alert(
                 title=info["title"],
                 partner=info["partner"],
@@ -217,7 +190,7 @@ def main():
             )
             alerts_sent += 1
 
-        # Case 2: Restock detected (previously sold out -> now available)
+        # Case 2: Restock
         elif not cached[r_id]["available"] and info["available"]:
             send_alert(
                 title=info["title"],
@@ -229,7 +202,7 @@ def main():
             )
             alerts_sent += 1
 
-        # Case 3: Reward sold out (previously available -> now sold out)
+        # Case 3: Sold out transition
         elif cached[r_id]["available"] and not info["available"]:
             send_alert(
                 title=info["title"],
@@ -241,8 +214,8 @@ def main():
             )
             alerts_sent += 1
 
-    save_cache(current)
-    print(f"\nFinished. Sent {alerts_sent} alerts.")
+    save_cache(current_all)
+    print(f"\nCycle finished. Sent {alerts_sent} alerts.")
 
 if __name__ == "__main__":
     main()
