@@ -11,24 +11,17 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 CACHE_FILE = "rewards_cache.json"
 
-# Direct partner catalog URLs
 PARTNER_TARGETS = [
-    {
-        "name": "Norwegian Cruise Line",
-        "url": "https://myvip.co/rewardstore/partner/66"
-    },
-    {
-        "name": "Royal Caribbean",
-        "url": "https://myvip.co/rewardstore/partner/29"
-    },
-    # If Virgin Voyages has a partner ID (e.g., check its URL in your browser), add it here
+    {"name": "Norwegian Cruise Line", "url": "https://myvip.co/rewardstore/partner/66"},
+    {"name": "Royal Caribbean", "url": "https://myvip.co/rewardstore/partner/29"},
+    # Add Virgin Voyages URL here when available
 ]
 
 def send_alert(title: str, partner: str, status: str, link: str, points: str = "", details: str = ""):
     print(f"\n[ALERT] {partner} | {title} | {status}\n")
 
     if DISCORD_WEBHOOK_URL:
-        embed_color = 5763719 if "AVAILABLE" in status else 15548997  # Green vs Red
+        embed_color = 5763719 if "AVAILABLE" in status else 15548997
         embed = {
             "title": f"🚢 {title}",
             "url": link,
@@ -44,7 +37,7 @@ def send_alert(title: str, partner: str, status: str, link: str, points: str = "
             embed["fields"].append({"name": "Details", "value": details[:300], "inline": False})
 
         payload = {
-            "content": f"🚨 **Cruise Reward Update:** {title}",
+            "content": f"🚨 **Cruise Alert:** {title}",
             "embeds": [embed]
         }
         try:
@@ -81,39 +74,88 @@ def save_cache(cache: dict):
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(cache, f, indent=2)
 
+def expand_all_rewards(page):
+    """Clicks 'See More', 'Load More', or 'View All' until all items are visible."""
+    max_clicks = 8
+    for i in range(max_clicks):
+        try:
+            # Look for common variations of the expand button
+            see_more = page.locator("button:has-text('See More'), button:has-text('Load More'), button:has-text('View All'), a:has-text('See More')").first
+            if see_more.is_visible(timeout=2000):
+                print(f"Clicking 'See More' button (expansion {i+1})...")
+                see_more.click()
+                time.sleep(2.5)
+            else:
+                break
+        except Exception:
+            break
+
 def scrape_partner_page(page, partner_info: dict) -> dict:
     url = partner_info["url"]
     partner_name = partner_info["name"]
     print(f"\nScanning {partner_name} at {url} ...")
 
-    page.goto(url, wait_until="networkidle", timeout=60000)
+    page.goto(url, wait_until="domcontentloaded", timeout=45000)
     time.sleep(4)
 
-    # Scroll down to ensure all cards load
-    for scroll in [1000, 2000, 0]:
-        page.evaluate(f"window.scrollTo(0, {scroll});")
-        time.sleep(1)
+    # 1. Scroll down to trigger lazy loading
+    page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2);")
+    time.sleep(1.5)
+    page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
+    time.sleep(1.5)
+
+    # 2. Click 'See More' to reveal all hidden cards
+    expand_all_rewards(page)
+
+    # 3. Final scroll to ensure all newly expanded cards mount
+    page.evaluate("window.scrollTo(0, 0);")
+    time.sleep(1)
 
     cards_data = page.evaluate("""() => {
         const results = [];
+        // Match reward cards on the partner grid
         const cards = document.querySelectorAll('div[class*="Card"], div[class*="card"], a[href*="/reward/"], div[role="button"]');
 
         cards.forEach(card => {
-            const rawText = card.innerText || "";
+            const rawText = (card.innerText || "").trim();
             const lines = rawText.split('\\n').map(l => l.trim()).filter(l => l.length > 0);
             
-            // Skip elements that are too small or container parents
+            // Skip containers that are too small or whole-page containers
             if (lines.length < 2 || rawText.length > 500) return;
 
             const linkEl = card.tagName === 'A' ? card : card.querySelector('a');
             const href = linkEl ? linkEl.getAttribute('href') : '';
-            const soldOut = /sold out|out of stock|unavailable|0 remaining/i.test(rawText);
+            
+            // 1. Text checks (case-insensitive)
+            const textLower = rawText.toLowerCase();
+            const textIndicatesSoldOut = textLower.includes('sold out') || 
+                                         textLower.includes('out of stock') || 
+                                         textLower.includes('unavailable') || 
+                                         textLower.includes('0 remaining') ||
+                                         textLower.includes('check back');
+
+            // 2. Class checks on the card container and children
+            const classString = (card.className || '') + ' ' + Array.from(card.querySelectorAll('*')).map(el => el.className || '').join(' ');
+            const classIndicatesSoldOut = /sold-out|soldout|disabled|unavailable|inactive|out-of-stock/i.test(classString);
+
+            // 3. Accessibility / Disabled attribute checks
+            const attrIndicatesSoldOut = card.getAttribute('aria-disabled') === 'true' || 
+                                         card.hasAttribute('disabled') ||
+                                         card.querySelector('[aria-disabled="true"], [disabled]') !== null;
+
+            // 4. Style check (opacity dimming for out of stock)
+            const computedStyle = window.getComputedStyle(card);
+            const opacity = parseFloat(computedStyle.opacity || '1');
+            const isDimmed = opacity < 0.7;
+
+            // An item is sold out if ANY indicator flags it
+            const isSoldOut = textIndicatesSoldOut || classIndicatesSoldOut || attrIndicatesSoldOut || isDimmed;
 
             results.push({
                 rawText: rawText,
                 lines: lines,
                 href: href || '',
-                is_available: !soldOut
+                is_available: !isSoldOut
             });
         });
         return results;
@@ -122,12 +164,12 @@ def scrape_partner_page(page, partner_info: dict) -> dict:
     partner_rewards = {}
     for item in cards_data:
         lines = item["lines"]
-        # Skip generic headers / back buttons
-        if any(h in lines[0].lower() for h in ["all partners", "terms", "back", "reward store"]):
+        # Skip generic headers / back navigation
+        if any(h in lines[0].lower() for h in ["all partners", "terms", "back", "reward store", "see more"]):
             continue
 
         title = lines[0]
-        # If line 0 is a brand name, use line 1 as the actual sailing title
+        # If line 0 is the brand name, take line 1 as the actual sailing title
         if title.lower() in ["norwegian", "royal caribbean", "virgin voyages"] and len(lines) > 1:
             title = lines[1]
 
@@ -167,19 +209,19 @@ def main():
             try:
                 rewards = scrape_partner_page(page, partner)
                 current_all.update(rewards)
-                print(f"Found {len(rewards)} rewards for {partner['name']}.")
+                print(f"Scanned {len(rewards)} total rewards for {partner['name']}.")
             except Exception as e:
                 print(f"Error scanning {partner['name']}: {e}")
 
-    print(f"\nTotal rewards tracked: {len(current_all)}")
+    print(f"\nGrand Total Rewards Tracked: {len(current_all)}")
     for cid, data in current_all.items():
         print(f" -> [{data['partner']}] {data['title']} | Available: {data['available']}")
 
     alerts_sent = 0
     for r_id, info in current_all.items():
-        # Case 1: Brand new drop
+        # Case 1: Brand-new drop
         if r_id not in cached:
-            status = "✅ AVAILABLE" if info["available"] else "❌ CURRENTLY SOLD OUT"
+            status = "✅ AVAILABLE" if info["available"] else "❌ SOLD OUT"
             send_alert(
                 title=info["title"],
                 partner=info["partner"],
