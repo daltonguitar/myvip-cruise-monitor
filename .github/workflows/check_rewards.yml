@@ -2,8 +2,8 @@ name: Check Cruise Rewards
 
 on:
   schedule:
-    # Runs every 15 minutes between 15:00 UTC and 22:00 UTC (8 AM - 3 PM Pacific)
-    - cron: '*/15 15-22 * * *'
+    # Runs every 15 minutes, 24 hours a day, 7 days a week
+    - cron: '*/15 * * * *'
   workflow_dispatch:
 
 permissions:
