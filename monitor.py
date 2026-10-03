@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import time
+import re
 from playwright.sync_api import sync_playwright
 import requests
 
@@ -12,12 +13,12 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 CACHE_FILE = "rewards_cache.json"
 
 PARTNER_TARGETS = [
-    {"name": "Norwegian Cruise Line", "url": "https://myvip.co/rewardstore/partner/66"},
     {"name": "Royal Caribbean", "url": "https://myvip.co/rewardstore/partner/29"},
+    {"name": "Norwegian Cruise Line", "url": "https://myvip.co/rewardstore/partner/66"},
 ]
 
-def send_alert(title: str, partner: str, status: str, link: str, points: str = ""):
-    print(f"\n[ALERT] {partner} | {title} | {status}\n")
+def send_alert(title: str, partner: str, status: str, link: str, stock_text: str = ""):
+    print(f"\n[ALERT] {partner} | {title} | {status} ({stock_text})\n")
 
     if DISCORD_WEBHOOK_URL:
         embed_color = 5763719 if "AVAILABLE" in status and "SOLD OUT" not in status else 15548997
@@ -30,8 +31,8 @@ def send_alert(title: str, partner: str, status: str, link: str, points: str = "
                 {"name": "Status", "value": status, "inline": True},
             ]
         }
-        if points:
-            embed["fields"].append({"name": "Loyalty Points", "value": str(points), "inline": True})
+        if stock_text:
+            embed["fields"].append({"name": "Stock Badge", "value": stock_text, "inline": True})
 
         payload = {
             "content": f"🚨 **Cruise Alert:** {title}",
@@ -45,7 +46,7 @@ def send_alert(title: str, partner: str, status: str, link: str, points: str = "
             print(f"Failed to post to Discord: {e}")
 
     if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-        tg_text = f"🚢 *{title}*\n*Partner:* {partner}\n*Status:* {status}\n*Points:* {points or 'N/A'}\n[View Reward]({link})"
+        tg_text = f"🚢 *{title}*\n*Partner:* {partner}\n*Status:* {status}\n*Stock:* {stock_text or 'N/A'}\n[View Reward]({link})"
         try:
             tg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             requests.post(tg_url, json={"chat_id": TELEGRAM_CHAT_ID, "text": tg_text, "parse_mode": "Markdown"}, timeout=10)
@@ -65,78 +66,22 @@ def save_cache(cache: dict):
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(cache, f, indent=2)
 
-def extract_rewards_from_api_payload(payload):
-    """Recursively searches JSON responses for reward objects containing inventory flags."""
-    extracted = []
-    
-    def search(obj):
-        if isinstance(obj, dict):
-            # Typical myVIP / playSTUDIOS reward data structure
-            has_name = "name" in obj or "title" in obj
-            has_stock = any(k in obj for k in ["quantity_remaining", "inventory", "is_sold_out", "sold_out", "purchasable", "quantityRemaining"])
-            if has_name and has_stock:
-                name = obj.get("name") or obj.get("title") or ""
-                
-                # Determine stock strictly
-                is_sold = False
-                if "is_sold_out" in obj:
-                    is_sold = bool(obj["is_sold_out"])
-                elif "sold_out" in obj:
-                    is_sold = bool(obj["sold_out"])
-                elif "quantity_remaining" in obj:
-                    is_sold = (obj["quantity_remaining"] == 0)
-                elif "quantityRemaining" in obj:
-                    is_sold = (obj["quantityRemaining"] == 0)
-                elif "purchasable" in obj:
-                    is_sold = not bool(obj["purchasable"])
-
-                points = obj.get("points") or obj.get("cost") or obj.get("loyalty_points") or ""
-                reward_id = str(obj.get("id") or obj.get("reward_id") or name)
-
-                extracted.append({
-                    "id": reward_id,
-                    "title": name.strip(),
-                    "available": not is_sold,
-                    "points": points
-                })
-            else:
-                for v in obj.values():
-                    search(v)
-        elif isinstance(obj, list):
-            for item in obj:
-                search(item)
-
-    search(payload)
-    return extracted
-
-def scrape_partner_fast(page, partner_info: dict) -> dict:
+def scrape_partner_grid(page, partner_info: dict) -> dict:
     url = partner_info["url"]
     partner_name = partner_info["name"]
-    print(f"\n[Fast Scan] Navigating to {partner_name} ({url})...")
+    print(f"\nScanning {partner_name} at {url} ...")
 
-    intercepted_items = []
+    page.goto(url, wait_until="domcontentloaded", timeout=45000)
+    time.sleep(5)
 
-    def on_response(response):
-        # Capture internal JSON responses
-        try:
-            if "application/json" in response.headers.get("content-type", ""):
-                data = response.json()
-                items = extract_rewards_from_api_payload(data)
-                if items:
-                    intercepted_items.extend(items)
-        except Exception:
-            pass
-
-    page.on("response", on_response)
-
-    # Load page and scroll once to trigger catalog load
-    page.goto(url, wait_until="domcontentloaded", timeout=30000)
-    time.sleep(3)
+    # Scroll down to ensure all tiles render
+    page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2);")
+    time.sleep(1.5)
     page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
-    time.sleep(2)
+    time.sleep(1.5)
 
-    # Click See More once or twice max if still loading
-    for _ in range(3):
+    # Click carousel arrows or 'See More' to expose all hidden cards
+    for _ in range(5):
         try:
             btn = page.locator("button:has-text('See More'), button:has-text('Load More')").first
             if btn.is_visible(timeout=1000):
@@ -147,53 +92,89 @@ def scrape_partner_fast(page, partner_info: dict) -> dict:
         except Exception:
             break
 
-    # Build the dictionary of rewards
-    results = {}
-    
-    # 1. If backend API data was intercepted, use it (highest accuracy)
-    if intercepted_items:
-        print(f"Captured {len(intercepted_items)} rewards via backend network payload.")
-        for item in intercepted_items:
-            key = f"{partner_name}_{item['title']}"
-            results[key] = {
-                "title": item["title"],
-                "partner": partner_name,
-                "available": item["available"],
-                "points": item["points"],
-                "link": url
-            }
-    
-    # 2. Fallback: Parse visible cards from DOM in one fast batch without clicking
-    if not results:
-        print("API payload not found; using rapid single-pass DOM evaluation...")
-        dom_cards = page.evaluate("""() => {
-            const cards = document.querySelectorAll('div[class*="Card"], div[class*="card"], a[href*="/reward/"]');
-            return Array.from(cards).map(card => {
-                const text = card.innerText || '';
-                const lines = text.split('\\n').map(l => l.trim()).filter(Boolean);
-                const isSoldOut = /sold out|out of stock|unavailable/i.test(text);
-                const hasDisabled = card.getAttribute('aria-disabled') === 'true' || card.querySelector('[aria-disabled="true"]') !== null;
-                return {
-                    lines: lines,
-                    available: !(isSoldOut || hasDisabled)
-                };
-            }).filter(c => c.lines.length >= 2);
-        }""")
+    # Read the card content and ribbon badges
+    cards_data = page.evaluate("""() => {
+        const results = [];
+        // Match reward card containers
+        const cards = document.querySelectorAll('div[class*="Card"], div[class*="card"], a[href*="/reward/"], div[role="button"]');
 
-        for c in dom_cards:
-            title = c["lines"][0]
-            if title.lower() in ["norwegian", "royal caribbean"] and len(c["lines"]) > 1:
-                title = c["lines"][1]
-            key = f"{partner_name}_{title}"
-            results[key] = {
-                "title": title,
-                "partner": partner_name,
-                "available": c["available"],
-                "points": "",
-                "link": url
+        cards.forEach(card => {
+            const rawText = (card.innerText || '').trim();
+            const lines = rawText.split('\\n').map(l => l.trim()).filter(Boolean);
+            if (lines.length < 2 || rawText.length > 500) return;
+
+            // Look for any badge or ribbon text (e.g., 'SOLD OUT', '4 LEFT', '3 LEFT')
+            let badgeText = "";
+            const allElements = [card, ...Array.from(card.querySelectorAll('*'))];
+            for (const el of allElements) {
+                const t = (el.innerText || '').trim().toUpperCase();
+                if (t === 'SOLD OUT' || /\\d+\\s+LEFT/.test(t) || t === 'OUT OF STOCK') {
+                    badgeText = t;
+                    break;
+                }
             }
 
-    return results
+            const linkEl = card.tagName === 'A' ? card : card.querySelector('a');
+            const href = linkEl ? linkEl.getAttribute('href') : '';
+
+            results.push({
+                rawText: rawText,
+                lines: lines,
+                href: href || '',
+                badgeText: badgeText
+            });
+        });
+        return results;
+    }""")
+
+    partner_rewards = {}
+    for item in cards_data:
+        lines = item["lines"]
+        if any(h in lines[0].lower() for h in ["all partners", "terms", "back", "reward store", "travel"]):
+            continue
+
+        # Isolate the sailing title (skipping the badge text if it appeared as the first line)
+        title = lines[0]
+        if title.upper() in ["SOLD OUT"] or "LEFT" in title.upper():
+            title = lines[1] if len(lines) > 1 else title
+
+        if title.lower() in ["norwegian", "royal caribbean", "virgin voyages"] and len(lines) > 1:
+            title = lines[1]
+
+        # Determine stock from the ribbon badge
+        badge = item["badgeText"].upper()
+        if not badge:
+            # Fallback to checking full card text for badge words
+            for l in lines:
+                up = l.upper()
+                if up == "SOLD OUT" or "LEFT" in up:
+                    badge = up
+                    break
+
+        if badge == "SOLD OUT" or "OUT OF STOCK" in badge:
+            is_available = False
+            status_desc = "SOLD OUT"
+        elif "LEFT" in badge:
+            is_available = True
+            status_desc = badge  # e.g., "4 LEFT", "3 LEFT"
+        else:
+            # Default safe: if there is no stock badge at all, treat as sold out
+            is_available = False
+            status_desc = "NO STOCK BADGE"
+
+        reward_id = f"{partner_name}_{title}"
+        link = f"https://myvip.co{item['href']}" if item["href"].startswith("/") else (item["href"] or url)
+
+        partner_rewards[reward_id] = {
+            "title": title,
+            "partner": partner_name,
+            "available": is_available,
+            "stock_text": status_desc,
+            "link": link
+        }
+        print(f" -> [{partner_name}] {title} | Status: {status_desc} (Available: {is_available})")
+
+    return partner_rewards
 
 def main():
     cached = load_cache()
@@ -209,52 +190,53 @@ def main():
 
         for partner in PARTNER_TARGETS:
             try:
-                rewards = scrape_partner_fast(page, partner)
+                rewards = scrape_partner_grid(page, partner)
                 current_all.update(rewards)
-                print(f"Scanned {len(rewards)} rewards for {partner['name']}.")
             except Exception as e:
                 print(f"Error scanning {partner['name']}: {e}")
 
-    print(f"\nTotal tracked rewards: {len(current_all)}")
+    print(f"\nTotal items processed: {len(current_all)}")
 
     alerts_sent = 0
     for r_id, info in current_all.items():
-        # Only alert new drops if they are actually in stock
+        # Case 1: Brand new drop that is IN STOCK
         if r_id not in cached:
             if info["available"]:
                 send_alert(
                     title=info["title"],
                     partner=info["partner"],
-                    status="✨ NEW DROP (✅ AVAILABLE NOW)",
+                    status="✨ NEW DROP (AVAILABLE)",
                     link=info["link"],
-                    points=info["points"]
+                    stock_text=info["stock_text"]
                 )
                 alerts_sent += 1
+            else:
+                print(f"Silently cataloged sold-out item: {info['title']}")
 
-        # Restock detected
+        # Case 2: Restock (was False -> now True)
         elif not cached[r_id]["available"] and info["available"]:
             send_alert(
                 title=info["title"],
                 partner=info["partner"],
                 status="🚨 RESTOCKED & AVAILABLE NOW!",
                 link=info["link"],
-                points=info["points"]
+                stock_text=info["stock_text"]
             )
             alerts_sent += 1
 
-        # Sold out detected
+        # Case 3: Sold out (was True -> now False)
         elif cached[r_id]["available"] and not info["available"]:
             send_alert(
                 title=info["title"],
                 partner=info["partner"],
                 status="⚠️ RECENTLY SOLD OUT",
                 link=info["link"],
-                points=info["points"]
+                stock_text=info["stock_text"]
             )
             alerts_sent += 1
 
     save_cache(current_all)
-    print(f"\nCycle finished in seconds. Sent {alerts_sent} alerts.")
+    print(f"Cycle finished. Alerts sent: {alerts_sent}")
 
 if __name__ == "__main__":
     main()
