@@ -32,7 +32,7 @@ def send_alert(title: str, partner: str, status: str, link: str, stock_text: str
             ]
         }
         if stock_text:
-            embed["fields"].append({"name": "Stock Badge", "value": stock_text, "inline": True})
+            embed["fields"].append({"name": "Stock", "value": stock_text, "inline": True})
 
         payload = {
             "content": f"🚨 **Cruise Alert:** {title}",
@@ -72,44 +72,40 @@ def scrape_partner_grid(page, partner_info: dict) -> dict:
     print(f"\nScanning {partner_name} at {url} ...")
 
     page.goto(url, wait_until="domcontentloaded", timeout=45000)
-    time.sleep(5)
+    
+    # Wait specifically for the carousel elements and badge ribbons to mount
+    try:
+        page.wait_for_selector("text=/LEFT|SOLD OUT/i", timeout=12000)
+        print("Ribbon badges detected on page!")
+    except Exception:
+        print("Timeout waiting for explicit badge text, proceeding with render scan...")
 
-    # Scroll down to ensure all tiles render
-    page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2);")
-    time.sleep(1.5)
-    page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
-    time.sleep(1.5)
+    time.sleep(3)
 
-    # Click carousel arrows or 'See More' to expose all hidden cards
-    for _ in range(5):
-        try:
-            btn = page.locator("button:has-text('See More'), button:has-text('Load More')").first
-            if btn.is_visible(timeout=1000):
-                btn.click()
-                time.sleep(1.5)
-            else:
-                break
-        except Exception:
-            break
+    # Scroll down to make sure all carousels/sections trigger their renders
+    page.evaluate("window.scrollTo(0, document.body.scrollHeight / 3);")
+    time.sleep(1)
+    page.evaluate("window.scrollTo(0, document.body.scrollHeight / 1.5);")
+    time.sleep(1)
 
-    # Read the card content and ribbon badges
     cards_data = page.evaluate("""() => {
         const results = [];
-        // Match reward card containers
-        const cards = document.querySelectorAll('div[class*="Card"], div[class*="card"], a[href*="/reward/"], div[role="button"]');
+        // Catch all card elements across carousels and grids
+        const cards = document.querySelectorAll('div[class*="Card"], div[class*="card"], div[class*="slide"], a[href*="/reward/"]');
 
         cards.forEach(card => {
             const rawText = (card.innerText || '').trim();
             const lines = rawText.split('\\n').map(l => l.trim()).filter(Boolean);
             if (lines.length < 2 || rawText.length > 500) return;
 
-            // Look for any badge or ribbon text (e.g., 'SOLD OUT', '4 LEFT', '3 LEFT')
+            // Search every child node specifically for ribbon badge text
             let badgeText = "";
             const allElements = [card, ...Array.from(card.querySelectorAll('*'))];
             for (const el of allElements) {
-                const t = (el.innerText || '').trim().toUpperCase();
-                if (t === 'SOLD OUT' || /\\d+\\s+LEFT/.test(t) || t === 'OUT OF STOCK') {
-                    badgeText = t;
+                const text = (el.innerText || '').trim().toUpperCase();
+                // Match ribbon patterns: "4 LEFT", "3 LEFT", "SOLD OUT"
+                if (text === 'SOLD OUT' || /\\d+\\s+LEFT/.test(text)) {
+                    badgeText = text;
                     break;
                 }
             }
@@ -130,10 +126,10 @@ def scrape_partner_grid(page, partner_info: dict) -> dict:
     partner_rewards = {}
     for item in cards_data:
         lines = item["lines"]
-        if any(h in lines[0].lower() for h in ["all partners", "terms", "back", "reward store", "travel"]):
+        if any(h in lines[0].lower() for h in ["all partners", "terms", "back", "reward store", "travel at"]):
             continue
 
-        # Isolate the sailing title (skipping the badge text if it appeared as the first line)
+        # Clean title
         title = lines[0]
         if title.upper() in ["SOLD OUT"] or "LEFT" in title.upper():
             title = lines[1] if len(lines) > 1 else title
@@ -141,15 +137,20 @@ def scrape_partner_grid(page, partner_info: dict) -> dict:
         if title.lower() in ["norwegian", "royal caribbean", "virgin voyages"] and len(lines) > 1:
             title = lines[1]
 
-        # Determine stock from the ribbon badge
+        # Ignore non-reward navigational artifacts
+        if len(title) < 4:
+            continue
+
         badge = item["badgeText"].upper()
         if not badge:
-            # Fallback to checking full card text for badge words
+            # Fallback text scan on lines
             for l in lines:
                 up = l.upper()
                 if up == "SOLD OUT" or "LEFT" in up:
                     badge = up
                     break
+
+        is_cruise_sailing = any(k in title.lower() for k in ["night", "cruise", "sailing", "voyage"])
 
         if badge == "SOLD OUT" or "OUT OF STOCK" in badge:
             is_available = False
@@ -158,21 +159,30 @@ def scrape_partner_grid(page, partner_info: dict) -> dict:
             is_available = True
             status_desc = badge  # e.g., "4 LEFT", "3 LEFT"
         else:
-            # Default safe: if there is no stock badge at all, treat as sold out
-            is_available = False
-            status_desc = "NO STOCK BADGE"
+            if is_cruise_sailing:
+                # If it's a cruise sailing and has no "LEFT" badge, it's sold out
+                is_available = False
+                status_desc = "SOLD OUT"
+            else:
+                # Digital vouchers (FreePlay, discount codes) don't have cabin counts
+                is_available = True
+                status_desc = "IN STOCK"
 
         reward_id = f"{partner_name}_{title}"
         link = f"https://myvip.co{item['href']}" if item["href"].startswith("/") else (item["href"] or url)
 
-        partner_rewards[reward_id] = {
-            "title": title,
-            "partner": partner_name,
-            "available": is_available,
-            "stock_text": status_desc,
-            "link": link
-        }
-        print(f" -> [{partner_name}] {title} | Status: {status_desc} (Available: {is_available})")
+        # Deduplicate cards that appear in multiple carousel wrappers
+        if reward_id not in partner_rewards or partner_rewards[reward_id]["stock_text"] == "SOLD OUT":
+            partner_rewards[reward_id] = {
+                "title": title,
+                "partner": partner_name,
+                "available": is_available,
+                "stock_text": status_desc,
+                "link": link
+            }
+
+    for cid, data in partner_rewards.items():
+        print(f" -> [{data['partner']}] {data['title']} | Badge: '{data['stock_text']}' | Available: {data['available']}")
 
     return partner_rewards
 
@@ -195,48 +205,48 @@ def main():
             except Exception as e:
                 print(f"Error scanning {partner['name']}: {e}")
 
-    print(f"\nTotal items processed: {len(current_all)}")
+    print(f"\nTotal unique items tracked: {len(current_all)}")
 
     alerts_sent = 0
     for r_id, info in current_all.items():
-        # Case 1: Brand new drop that is IN STOCK
+        # First discovery: only alert if actually in stock
         if r_id not in cached:
             if info["available"]:
                 send_alert(
                     title=info["title"],
                     partner=info["partner"],
-                    status="✨ NEW DROP (AVAILABLE)",
+                    status=f"✨ AVAILABLE NOW ({info['stock_text']})",
                     link=info["link"],
                     stock_text=info["stock_text"]
                 )
                 alerts_sent += 1
             else:
-                print(f"Silently cataloged sold-out item: {info['title']}")
+                print(f"Initial sync: cataloged sold-out sailing: {info['title']}")
 
-        # Case 2: Restock (was False -> now True)
+        # Restock: was False -> now True
         elif not cached[r_id]["available"] and info["available"]:
             send_alert(
                 title=info["title"],
                 partner=info["partner"],
-                status="🚨 RESTOCKED & AVAILABLE NOW!",
+                status=f"🚨 RESTOCKED & AVAILABLE NOW! ({info['stock_text']})",
                 link=info["link"],
                 stock_text=info["stock_text"]
             )
             alerts_sent += 1
 
-        # Case 3: Sold out (was True -> now False)
+        # Sold Out: was True -> now False
         elif cached[r_id]["available"] and not info["available"]:
             send_alert(
                 title=info["title"],
                 partner=info["partner"],
-                status="⚠️ RECENTLY SOLD OUT",
+                status="⚠️ SOLD OUT",
                 link=info["link"],
                 stock_text=info["stock_text"]
             )
             alerts_sent += 1
 
     save_cache(current_all)
-    print(f"Cycle finished. Alerts sent: {alerts_sent}")
+    print(f"Finished. Alerts sent: {alerts_sent}")
 
 if __name__ == "__main__":
     main()
