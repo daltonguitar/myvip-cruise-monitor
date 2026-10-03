@@ -71,22 +71,6 @@
     "details": "4 Night Okinawa Cruise \u2022 Royal Caribbean \u2022 230,000",
     "link": "https://myvip.co/rewardstore/partner/29"
   },
-  "Royal Caribbean_4 Night Jeju & Busan": {
-    "title": "4 Night Jeju & Busan",
-    "partner": "Royal Caribbean",
-    "available": true,
-    "points": "280,000",
-    "details": "4 Night Jeju & Busan \u2022 Royal Caribbean \u2022 280,000",
-    "link": "https://myvip.co/rewardstore/partner/29"
-  },
-  "Royal Caribbean_5 Night Okinawa-Ishigaki": {
-    "title": "5 Night Okinawa-Ishigaki",
-    "partner": "Royal Caribbean",
-    "available": true,
-    "points": "280,000",
-    "details": "5 Night Okinawa-Ishigaki \u2022 Royal Caribbean \u2022 280,000",
-    "link": "https://myvip.co/rewardstore/partner/29"
-  },
   "Royal Caribbean_5 Night Okinawa Cruise": {
     "title": "5 Night Okinawa Cruise",
     "partner": "Royal Caribbean",
@@ -101,6 +85,22 @@
     "available": true,
     "points": "280,000",
     "details": "5 Night Kagoshima-Okinawa \u2022 Royal Caribbean \u2022 280,000",
+    "link": "https://myvip.co/rewardstore/partner/29"
+  },
+  "Royal Caribbean_4 Night Jeju & Busan": {
+    "title": "4 Night Jeju & Busan",
+    "partner": "Royal Caribbean",
+    "available": true,
+    "points": "280,000",
+    "details": "4 Night Jeju & Busan \u2022 Royal Caribbean \u2022 280,000",
+    "link": "https://myvip.co/rewardstore/partner/29"
+  },
+  "Royal Caribbean_5 Night Okinawa-Ishigaki": {
+    "title": "5 Night Okinawa-Ishigaki",
+    "partner": "Royal Caribbean",
+    "available": true,
+    "points": "280,000",
+    "details": "5 Night Okinawa-Ishigaki \u2022 Royal Caribbean \u2022 280,000",
     "link": "https://myvip.co/rewardstore/partner/29"
   },
   "Royal Caribbean_8 Night Best of Asia": {
