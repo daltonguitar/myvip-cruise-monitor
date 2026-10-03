@@ -31,7 +31,7 @@ def send_alert(title: str, partner: str, status: str, link: str, points: str = "
             ]
         }
         if points:
-            embed["fields"].append({"name": "Loyalty Points", "value": points, "inline": True})
+            embed["fields"].append({"name": "Loyalty Points", "value": str(points), "inline": True})
 
         payload = {
             "content": f"🚨 **Cruise Alert:** {title}",
@@ -65,135 +65,135 @@ def save_cache(cache: dict):
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(cache, f, indent=2)
 
-def expand_all_rewards(page):
-    """Clicks 'See More' until all cards on the partner grid are displayed."""
-    for i in range(8):
+def extract_rewards_from_api_payload(payload):
+    """Recursively searches JSON responses for reward objects containing inventory flags."""
+    extracted = []
+    
+    def search(obj):
+        if isinstance(obj, dict):
+            # Typical myVIP / playSTUDIOS reward data structure
+            has_name = "name" in obj or "title" in obj
+            has_stock = any(k in obj for k in ["quantity_remaining", "inventory", "is_sold_out", "sold_out", "purchasable", "quantityRemaining"])
+            if has_name and has_stock:
+                name = obj.get("name") or obj.get("title") or ""
+                
+                # Determine stock strictly
+                is_sold = False
+                if "is_sold_out" in obj:
+                    is_sold = bool(obj["is_sold_out"])
+                elif "sold_out" in obj:
+                    is_sold = bool(obj["sold_out"])
+                elif "quantity_remaining" in obj:
+                    is_sold = (obj["quantity_remaining"] == 0)
+                elif "quantityRemaining" in obj:
+                    is_sold = (obj["quantityRemaining"] == 0)
+                elif "purchasable" in obj:
+                    is_sold = not bool(obj["purchasable"])
+
+                points = obj.get("points") or obj.get("cost") or obj.get("loyalty_points") or ""
+                reward_id = str(obj.get("id") or obj.get("reward_id") or name)
+
+                extracted.append({
+                    "id": reward_id,
+                    "title": name.strip(),
+                    "available": not is_sold,
+                    "points": points
+                })
+            else:
+                for v in obj.values():
+                    search(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                search(item)
+
+    search(payload)
+    return extracted
+
+def scrape_partner_fast(page, partner_info: dict) -> dict:
+    url = partner_info["url"]
+    partner_name = partner_info["name"]
+    print(f"\n[Fast Scan] Navigating to {partner_name} ({url})...")
+
+    intercepted_items = []
+
+    def on_response(response):
+        # Capture internal JSON responses
         try:
-            btn = page.locator("button:has-text('See More'), button:has-text('Load More'), a:has-text('See More')").first
-            if btn.is_visible(timeout=2000):
-                print(f"Expanding rewards list (click {i+1})...")
+            if "application/json" in response.headers.get("content-type", ""):
+                data = response.json()
+                items = extract_rewards_from_api_payload(data)
+                if items:
+                    intercepted_items.extend(items)
+        except Exception:
+            pass
+
+    page.on("response", on_response)
+
+    # Load page and scroll once to trigger catalog load
+    page.goto(url, wait_until="domcontentloaded", timeout=30000)
+    time.sleep(3)
+    page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
+    time.sleep(2)
+
+    # Click See More once or twice max if still loading
+    for _ in range(3):
+        try:
+            btn = page.locator("button:has-text('See More'), button:has-text('Load More')").first
+            if btn.is_visible(timeout=1000):
                 btn.click()
-                time.sleep(2)
+                time.sleep(1.5)
             else:
                 break
         except Exception:
             break
 
-def check_reward_availability(page, card_locator, partner_name: str) -> dict:
-    """Clicks into the card, checks the actual Redeem button state, then closes it."""
-    try:
-        raw_text = card_locator.inner_text().strip()
-        lines = [l.strip() for l in raw_text.split('\n') if l.strip()]
-        if len(lines) < 2:
-            return None
-
-        title = lines[0]
-        if title.lower() in ["norwegian", "royal caribbean", "virgin voyages"] and len(lines) > 1:
-            title = lines[1]
-
-        points = ""
-        for line in lines:
-            if any(c.isdigit() for c in line) and any(k in line.lower() for k in ["pts", "points", "lp", ","]):
-                points = line
-                break
-
-        # Click the card to open its detail drawer/modal
-        card_locator.click()
-        time.sleep(2)
-
-        # Inspect the modal's primary action button
-        is_available = page.evaluate("""() => {
-            // Find all buttons inside dialogs, modals, or slideouts
-            const buttons = Array.from(document.querySelectorAll('div[role="dialog"] button, [class*="modal"] button, [class*="drawer"] button, button[class*="Redeem"], button[class*="purchase"]'));
-            
-            for (const b of buttons) {
-                const text = (b.innerText || '').toLowerCase().trim();
-                if (!text) continue;
-
-                if (text.includes('sold out') || text.includes('out of stock') || text.includes('unavailable')) {
-                    return false;
-                }
-                if (text.includes('redeem') || text.includes('get reward') || text.includes('purchase')) {
-                    const isDisabled = b.disabled || b.getAttribute('aria-disabled') === 'true' || b.classList.contains('disabled');
-                    return !isDisabled;
-                }
+    # Build the dictionary of rewards
+    results = {}
+    
+    # 1. If backend API data was intercepted, use it (highest accuracy)
+    if intercepted_items:
+        print(f"Captured {len(intercepted_items)} rewards via backend network payload.")
+        for item in intercepted_items:
+            key = f"{partner_name}_{item['title']}"
+            results[key] = {
+                "title": item["title"],
+                "partner": partner_name,
+                "available": item["available"],
+                "points": item["points"],
+                "link": url
             }
-            
-            // Check if full page/modal body text mentions sold out
-            const body = document.body.innerText.toLowerCase();
-            if (body.includes('sold out') || body.includes('out of stock') || body.includes('all rewards claimed')) {
-                return false;
-            }
-
-            return false; // Default safe: if we can't confirm a live Redeem button, it's NOT available
+    
+    # 2. Fallback: Parse visible cards from DOM in one fast batch without clicking
+    if not results:
+        print("API payload not found; using rapid single-pass DOM evaluation...")
+        dom_cards = page.evaluate("""() => {
+            const cards = document.querySelectorAll('div[class*="Card"], div[class*="card"], a[href*="/reward/"]');
+            return Array.from(cards).map(card => {
+                const text = card.innerText || '';
+                const lines = text.split('\\n').map(l => l.trim()).filter(Boolean);
+                const isSoldOut = /sold out|out of stock|unavailable/i.test(text);
+                const hasDisabled = card.getAttribute('aria-disabled') === 'true' || card.querySelector('[aria-disabled="true"]') !== null;
+                return {
+                    lines: lines,
+                    available: !(isSoldOut || hasDisabled)
+                };
+            }).filter(c => c.lines.length >= 2);
         }""")
 
-        # Close the modal (press Escape or click the close button)
-        try:
-            close_btn = page.locator("button[aria-label*='close' i], button:has-text('✕'), [class*='Close']").first
-            if close_btn.is_visible(timeout=1000):
-                close_btn.click()
-            else:
-                page.keyboard.press("Escape")
-        except Exception:
-            page.keyboard.press("Escape")
+        for c in dom_cards:
+            title = c["lines"][0]
+            if title.lower() in ["norwegian", "royal caribbean"] and len(c["lines"]) > 1:
+                title = c["lines"][1]
+            key = f"{partner_name}_{title}"
+            results[key] = {
+                "title": title,
+                "partner": partner_name,
+                "available": c["available"],
+                "points": "",
+                "link": url
+            }
 
-        time.sleep(1)
-
-        return {
-            "title": title,
-            "partner": partner_name,
-            "available": is_available,
-            "points": points,
-            "link": page.url
-        }
-    except Exception as e:
-        print(f"Error checking card: {e}")
-        try:
-            page.keyboard.press("Escape")
-        except Exception:
-            pass
-        return None
-
-def scrape_partner(page, partner_info: dict) -> dict:
-    url = partner_info["url"]
-    partner_name = partner_info["name"]
-    print(f"\nNavigating to {partner_name} ({url}) ...")
-
-    page.goto(url, wait_until="domcontentloaded", timeout=45000)
-    time.sleep(4)
-
-    # Scroll down to load initial cards
-    page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2);")
-    time.sleep(1.5)
-    page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
-    time.sleep(1.5)
-
-    expand_all_rewards(page)
-    time.sleep(2)
-
-    # Find all card elements on the partner grid
-    card_locators = page.locator("div[class*='Card'], div[class*='card'], a[href*='/reward/']").all()
-    print(f"Found {len(card_locators)} card elements for {partner_name}.")
-
-    partner_rewards = {}
-    for idx, card in enumerate(card_locators):
-        try:
-            text = card.inner_text().strip()
-            # Skip empty or irrelevant containers
-            if len(text) < 15 or "all partners" in text.lower() or "see more" in text.lower():
-                continue
-
-            result = check_reward_availability(page, card, partner_name)
-            if result and result["title"]:
-                r_id = f"{partner_name}_{result['title']}"
-                partner_rewards[r_id] = result
-                status_str = "✅ IN STOCK" if result["available"] else "❌ SOLD OUT"
-                print(f" -> [{partner_name}] {result['title']} | {status_str}")
-        except Exception as e:
-            continue
-
-    return partner_rewards
+    return results
 
 def main():
     cached = load_cache()
@@ -209,16 +209,17 @@ def main():
 
         for partner in PARTNER_TARGETS:
             try:
-                rewards = scrape_partner(page, partner)
+                rewards = scrape_partner_fast(page, partner)
                 current_all.update(rewards)
+                print(f"Scanned {len(rewards)} rewards for {partner['name']}.")
             except Exception as e:
                 print(f"Error scanning {partner['name']}: {e}")
 
-    print(f"\nScan complete. Total rewards evaluated: {len(current_all)}")
+    print(f"\nTotal tracked rewards: {len(current_all)}")
 
     alerts_sent = 0
     for r_id, info in current_all.items():
-        # Case 1: Brand-new item dropped and it is ACTUALLY available
+        # Only alert new drops if they are actually in stock
         if r_id not in cached:
             if info["available"]:
                 send_alert(
@@ -229,10 +230,8 @@ def main():
                     points=info["points"]
                 )
                 alerts_sent += 1
-            else:
-                print(f"New item found in archive, but sold out: {info['title']} (no alert sent)")
 
-        # Case 2: Restocked (was false -> now true)
+        # Restock detected
         elif not cached[r_id]["available"] and info["available"]:
             send_alert(
                 title=info["title"],
@@ -243,7 +242,7 @@ def main():
             )
             alerts_sent += 1
 
-        # Case 3: Sold out (was true -> now false)
+        # Sold out detected
         elif cached[r_id]["available"] and not info["available"]:
             send_alert(
                 title=info["title"],
@@ -255,7 +254,7 @@ def main():
             alerts_sent += 1
 
     save_cache(current_all)
-    print(f"Finished. Sent {alerts_sent} alerts.")
+    print(f"\nCycle finished in seconds. Sent {alerts_sent} alerts.")
 
 if __name__ == "__main__":
     main()
