@@ -72,40 +72,45 @@ def scrape_partner_grid(page, partner_info: dict) -> dict:
     print(f"\nScanning {partner_name} at {url} ...")
 
     page.goto(url, wait_until="domcontentloaded", timeout=45000)
-    
-    # Wait specifically for the carousel elements and badge ribbons to mount
-    try:
-        page.wait_for_selector("text=/LEFT|SOLD OUT/i", timeout=12000)
-        print("Ribbon badges detected on page!")
-    except Exception:
-        print("Timeout waiting for explicit badge text, proceeding with render scan...")
+    time.sleep(4)
 
-    time.sleep(3)
+    # Scroll down to Travel section to trigger carousel mounting
+    page.evaluate("window.scrollTo(0, 400);")
+    time.sleep(2)
 
-    # Scroll down to make sure all carousels/sections trigger their renders
-    page.evaluate("window.scrollTo(0, document.body.scrollHeight / 3);")
-    time.sleep(1)
+    # Advance the carousel slider multiple times by clicking the right chevron/arrow ('>')
+    # This forces lazy-loaded cruise cards and ribbon badges to mount into the DOM
+    for step in range(8):
+        try:
+            next_arrow = page.locator("button:has-text('>'), [aria-label*='next' i], [class*='next'], [class*='arrow-right'], [class*='chevron-right']").first
+            if next_arrow.is_visible(timeout=1000):
+                next_arrow.click()
+                time.sleep(0.8)
+        except Exception:
+            break
+
+    # Scroll further down to load any standard grid items (FreePlay, vouchers)
     page.evaluate("window.scrollTo(0, document.body.scrollHeight / 1.5);")
-    time.sleep(1)
+    time.sleep(1.5)
 
+    # Extract all cards (both carousel slides and grid items)
     cards_data = page.evaluate("""() => {
         const results = [];
-        // Catch all card elements across carousels and grids
-        const cards = document.querySelectorAll('div[class*="Card"], div[class*="card"], div[class*="slide"], a[href*="/reward/"]');
+        // Capture carousel slide cards as well as standard grid tiles
+        const elements = document.querySelectorAll('[class*="slide"], [class*="Card"], [class*="card"], a[href*="/reward/"]');
 
-        cards.forEach(card => {
+        elements.forEach(card => {
             const rawText = (card.innerText || '').trim();
             const lines = rawText.split('\\n').map(l => l.trim()).filter(Boolean);
-            if (lines.length < 2 || rawText.length > 500) return;
+            if (lines.length < 2 || rawText.length > 600) return;
 
-            // Search every child node specifically for ribbon badge text
+            // Search for ribbon badges (e.g. '4 LEFT', '3 LEFT', 'SOLD OUT')
             let badgeText = "";
-            const allElements = [card, ...Array.from(card.querySelectorAll('*'))];
-            for (const el of allElements) {
-                const text = (el.innerText || '').trim().toUpperCase();
-                // Match ribbon patterns: "4 LEFT", "3 LEFT", "SOLD OUT"
-                if (text === 'SOLD OUT' || /\\d+\\s+LEFT/.test(text)) {
-                    badgeText = text;
+            const subNodes = [card, ...Array.from(card.querySelectorAll('*'))];
+            for (const el of subNodes) {
+                const txt = (el.innerText || '').trim().toUpperCase();
+                if (txt === 'SOLD OUT' || /\\d+\\s+LEFT/.test(txt)) {
+                    badgeText = txt;
                     break;
                 }
             }
@@ -126,10 +131,10 @@ def scrape_partner_grid(page, partner_info: dict) -> dict:
     partner_rewards = {}
     for item in cards_data:
         lines = item["lines"]
-        if any(h in lines[0].lower() for h in ["all partners", "terms", "back", "reward store", "travel at"]):
+        if any(h in lines[0].lower() for h in ["all partners", "terms", "back", "reward store", "travel at", "partners list"]):
             continue
 
-        # Clean title
+        # Extract title
         title = lines[0]
         if title.upper() in ["SOLD OUT"] or "LEFT" in title.upper():
             title = lines[1] if len(lines) > 1 else title
@@ -137,13 +142,13 @@ def scrape_partner_grid(page, partner_info: dict) -> dict:
         if title.lower() in ["norwegian", "royal caribbean", "virgin voyages"] and len(lines) > 1:
             title = lines[1]
 
-        # Ignore non-reward navigational artifacts
-        if len(title) < 4:
+        # Skip headers / labels
+        if len(title) < 4 or title.lower().startswith("various ports"):
             continue
 
+        # Check ribbon badge
         badge = item["badgeText"].upper()
         if not badge:
-            # Fallback text scan on lines
             for l in lines:
                 up = l.upper()
                 if up == "SOLD OUT" or "LEFT" in up:
@@ -157,22 +162,22 @@ def scrape_partner_grid(page, partner_info: dict) -> dict:
             status_desc = "SOLD OUT"
         elif "LEFT" in badge:
             is_available = True
-            status_desc = badge  # e.g., "4 LEFT", "3 LEFT"
+            status_desc = badge  # e.g., '4 LEFT', '3 LEFT'
         else:
             if is_cruise_sailing:
-                # If it's a cruise sailing and has no "LEFT" badge, it's sold out
+                # If it's a cruise sailing and has no ribbon showing stock, treat as sold out
                 is_available = False
                 status_desc = "SOLD OUT"
             else:
-                # Digital vouchers (FreePlay, discount codes) don't have cabin counts
+                # Digital vouchers (FreePlay, credit)
                 is_available = True
                 status_desc = "IN STOCK"
 
         reward_id = f"{partner_name}_{title}"
         link = f"https://myvip.co{item['href']}" if item["href"].startswith("/") else (item["href"] or url)
 
-        # Deduplicate cards that appear in multiple carousel wrappers
-        if reward_id not in partner_rewards or partner_rewards[reward_id]["stock_text"] == "SOLD OUT":
+        # Prefer an entry that has an active 'LEFT' badge if duplicate slides exist
+        if reward_id not in partner_rewards or ("LEFT" in status_desc and "LEFT" not in partner_rewards[reward_id]["stock_text"]):
             partner_rewards[reward_id] = {
                 "title": title,
                 "partner": partner_name,
@@ -205,11 +210,11 @@ def main():
             except Exception as e:
                 print(f"Error scanning {partner['name']}: {e}")
 
-    print(f"\nTotal unique items tracked: {len(current_all)}")
+    print(f"\nTotal items tracked across partners: {len(current_all)}")
 
     alerts_sent = 0
     for r_id, info in current_all.items():
-        # First discovery: only alert if actually in stock
+        # First discovery: only send alert if it has available stock
         if r_id not in cached:
             if info["available"]:
                 send_alert(
@@ -246,7 +251,7 @@ def main():
             alerts_sent += 1
 
     save_cache(current_all)
-    print(f"Finished. Alerts sent: {alerts_sent}")
+    print(f"Finished. Sent {alerts_sent} alerts.")
 
 if __name__ == "__main__":
     main()
