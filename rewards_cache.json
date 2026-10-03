@@ -37,8 +37,8 @@
   "Royal Caribbean_4 Night Busan Cruise": {
     "title": "4 Night Busan Cruise",
     "partner": "Royal Caribbean",
-    "available": false,
-    "stock_text": "SOLD OUT",
+    "available": true,
+    "stock_text": "6 LEFT\n4 NIGHT BUSAN CRUISE\nROYAL CARIBBEAN\n100,000",
     "link": "https://myvip.co/rewardstore/partner/29"
   },
   "Royal Caribbean_RCCL $150 in FREEPLAY": {
@@ -58,8 +58,8 @@
   "Royal Caribbean_4 Night Okinawa Cruise": {
     "title": "4 Night Okinawa Cruise",
     "partner": "Royal Caribbean",
-    "available": false,
-    "stock_text": "SOLD OUT",
+    "available": true,
+    "stock_text": "2 LEFT\n4 NIGHT OKINAWA CRUISE\nROYAL CARIBBEAN\n230,000",
     "link": "https://myvip.co/rewardstore/partner/29"
   },
   "Royal Caribbean_5 Night Okinawa Cruise": {
@@ -72,8 +72,8 @@
   "Royal Caribbean_5 Night Kagoshima-Okinawa": {
     "title": "5 Night Kagoshima-Okinawa",
     "partner": "Royal Caribbean",
-    "available": false,
-    "stock_text": "SOLD OUT",
+    "available": true,
+    "stock_text": "3 LEFT\n5 NIGHT KAGOSHIMA-OKINAWA\nROYAL CARIBBEAN\n280,000",
     "link": "https://myvip.co/rewardstore/partner/29"
   },
   "Royal Caribbean_4 Night Jeju & Busan": {
