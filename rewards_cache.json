@@ -58,8 +58,8 @@
   "Royal Caribbean_4 Night Okinawa Cruise": {
     "title": "4 Night Okinawa Cruise",
     "partner": "Royal Caribbean",
-    "available": true,
-    "stock_text": "1 LEFT\n4 NIGHT OKINAWA CRUISE\nROYAL CARIBBEAN\n230,000",
+    "available": false,
+    "stock_text": "SOLD OUT",
     "link": "https://myvip.co/rewardstore/partner/29"
   },
   "Royal Caribbean_5 Night Okinawa Cruise": {
